@@ -157,7 +157,8 @@ camera = CameraStream(src="rtsp://admin:password@192.168.1.100:554/stream1").sta
 ## 🎓 Дообучение модели
 
 Как перейти от демо к реальной детекции — собрать данные, разметить, обучить
-(Few-Shot / LoRA-fine-tuning VLM / YOLO) и вернуть модель в систему — подробно
+(Few-Shot/RAG, LoRA-fine-tuning VLM, YOLO, плюс sim-to-real, anomaly detection,
+active learning, дистилляция и др.) и вернуть модель в систему — подробно
 описано в отдельном руководстве:
 
 **→ [docs/fine-tuning.md](docs/fine-tuning.md)**
