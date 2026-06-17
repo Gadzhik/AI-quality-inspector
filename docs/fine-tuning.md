@@ -335,6 +335,60 @@ yolo detect val   model=runs/detect/train/weights/best.pt data=meat.yaml
 | I | Pseudo-labeling | масштаб на сыром видео | — |
 | J | SAM-сегментация | пиксельная маска + площадь | — |
 
+### Как встроить в наш код
+
+Конкретные точки интеграции с текущей кодовой базой:
+
+**D. Sim-to-real.** В [`create_realistic_defects.py`](../create_realistic_defects.py)
+прогнать генерацию на множестве фоновых видео и вынуть боксы из манифеста в
+YOLO-формат:
+```python
+# из defects_manifest.json -> dataset/yolo/labels/*.txt
+for ep in manifest["episodes"]:
+    x1, y1, x2, y2 = ep["box"]
+    xc, yc = (x1 + x2) / 2 / W, (y1 + y2) / 2 / H
+    bw, bh = (x2 - x1) / W, (y2 - y1) / H
+    line = f"0 {xc} {yc} {bw} {bh}"   # class 0 = blood_clot
+```
+Обучаем YOLO на синтетике, потом дообучаем на реальном (раздел C/6.5).
+
+**E. Anomaly detection.** Новый модуль `src/anomaly.py` поверх `anomalib`,
+обучённый на `dataset/positive/`. Встраивается как замена детектора в `main.py`:
+```python
+# вместо manifest.lookup(frame_idx)
+score, mask = anomaly.score(frame)      # 0..1
+defect = score > THRESHOLD
+box = mask_to_box(mask) if defect else None
+```
+
+**F. Эмбеддинги + голова.** `src/embed_head.py`: замороженный DINOv2 → вектор,
+сверху обученный линейный классификатор. Тот же интерфейс `score(frame)`, что и
+у E — подключается в `main.py` в ту же точку.
+
+**G. Active learning.** В `main.py` после получения `confidence` от детектора
+авто-сохранять пограничные кадры в очередь:
+```python
+if 0.4 <= confidence <= 0.6:
+    collector.save_for_review(frame, meta)   # доп. метод в dataset_collector.py
+```
+Оператор затем подтверждает их клавишами `s`/`d` (логика уже есть) → дообучение.
+
+**H. Дистилляция.** Скриптом гоняем `analyzer.analyze_frame()`
+([`src/analyzer.py`](../src/analyzer.py)) по сырым кадрам, складываем JSON-ответы
+как псевдо-метки → обучаем YOLO-студента на них.
+
+**I. Pseudo-labeling.** То же, но учитель — уже дообученная лёгкая модель;
+фильтруем по `confidence > 0.9`, добавляем в `dataset/yolo`.
+
+**J. SAM-сегментация.** Разметка масок в Label Studio (SAM-бэкенд) → обучение
+YOLO-seg; в `src/hud.py` рисуем маску/контур вместо `_corner_box`, а площадь
+маски выводим в метрики HUD.
+
+> Общая точка подключения для **E/F/H/I/J** — та же строка в `main.py`, где
+> сейчас стоит `manifest.lookup(frame_idx)` (см. [раздел 10](#10-возврат-модели-в-систему)).
+> Манифест — это «заглушка-детектор» с единым интерфейсом, любую обученную модель
+> ставим на его место.
+
 ## 9. Оценка качества
 
 Меряем **на отложенном test-сплите** (другие смены/туши):
