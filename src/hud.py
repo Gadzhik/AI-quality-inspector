@@ -1,16 +1,22 @@
 """Профессиональный индустриальный HUD-оверлей для AI Quality Inspector.
 
-Тёмный полупрозрачный интерфейс: верхняя/нижняя панели, угловые маркеры бокса
-дефекта (не сплошной прямоугольник — выглядит как промышленный детектор),
-плавный пульс тревоги (без дёрганого мигания). Все размеры масштабируются от
-высоты кадра (калибровка под 1080p), чтобы UI смотрелся одинаково на любом
-разрешении. cv2 рисует в координатах полного кадра — окно само масштабирует.
+Текст рисуется настоящим TTF-шрифтом (Bahnschrift, DIN-стиль) через Pillow —
+чёткий антиалиасинг, промышленный «приборный» вид. Векторные шрифты OpenCV
+(Hershey) выглядят зубчато/убого, поэтому не используются для текста; cv2
+рисует только геометрию (панели, рамки, линии, точки).
+
+Геометрия рисуется на numpy-кадре, текст копится в список и накладывается
+одним проходом Pillow в конце (одна BGR<->RGB конвертация на кадр). Все размеры
+масштабируются от высоты кадра (калибровка под 1080p).
 """
+import os
 import cv2
 import math
 import time
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
-# Палитра (BGR)
+# Палитра (BGR — для cv2-геометрии)
 DARK   = (20, 20, 22)
 GREEN  = (110, 210, 120)
 RED    = (60, 55, 235)
@@ -18,26 +24,36 @@ AMBER  = (40, 180, 235)
 TXT    = (235, 235, 235)
 MUTE   = (150, 150, 150)
 WHITE  = (255, 255, 255)
+SEPCOL = (70, 70, 74)
 
-# Оба — FONT_HERSHEY_SIMPLEX: одноштриховый инженерный вектор (как в CAD/плоттерах),
-# точный «приборный» вид. DUPLEX даёт двойной штрих = жирно, поэтому не используем.
-# Иерархия строится размером и цветом, а не жирностью.
-FONT_H = cv2.FONT_HERSHEY_SIMPLEX   # заголовки
-FONT_B = cv2.FONT_HERSHEY_SIMPLEX   # тело
+# Индустриальный шрифт. Bahnschrift = DIN 1451 (промышленная/транспортная
+# типографика), средний вес — не тонкий и не жирный. Фоллбэк на Consolas/Segoe.
+_FONT_CANDIDATES = [
+    "C:/Windows/Fonts/bahnschrift.ttf",
+    "C:/Windows/Fonts/consolab.ttf",
+    "C:/Windows/Fonts/segoeuib.ttf",
+]
+_FONT_PATH = next((p for p in _FONT_CANDIDATES if os.path.exists(p)), None)
+_font_cache = {}
+
+
+def _font(px):
+    px = max(9, int(round(px)))
+    f = _font_cache.get(px)
+    if f is None:
+        f = ImageFont.truetype(_FONT_PATH, px) if _FONT_PATH else ImageFont.load_default()
+        _font_cache[px] = f
+    return f
+
+
+def _bgr2rgb(c):
+    return (c[2], c[1], c[0])
 
 
 def _panel(img, p1, p2, color=DARK, alpha=0.58):
     ov = img.copy()
     cv2.rectangle(ov, p1, p2, color, -1)
     cv2.addWeighted(ov, alpha, img, 1 - alpha, 0, img)
-
-
-def _text(img, s, org, scale, color, thick=1, font=FONT_B):
-    cv2.putText(img, s, org, font, scale, color, thick, cv2.LINE_AA)
-
-
-def _tw(s, scale, thick=1, font=FONT_B):
-    return cv2.getTextSize(s, font, scale, thick)[0][0]
 
 
 def _dot(img, center, color, r):
@@ -61,122 +77,129 @@ def render(frame, state):
     defect = state.get("defect", False)
     accent = RED if defect else GREEN
 
+    texts = []  # (str, (x_baseline_left, y_baseline), font, rgb, stroke)
+
+    def fnt(px):
+        return _font(px * ui)
+
+    def tw(s, px):
+        return int(fnt(px).getlength(s))
+
+    def T(s, x, y, px, color, stroke=0):
+        texts.append((s, (int(x), int(y)), fnt(px), _bgr2rgb(color), stroke))
+
     # --- Тонкая акцентная рамка кадра (зелёная норма / красная тревога) ---
-    bt = max(2, int(3 * ui))
-    cv2.rectangle(frame, (0, 0), (w - 1, h - 1), accent, bt)
+    cv2.rectangle(frame, (0, 0), (w - 1, h - 1), accent, max(2, int(3 * ui)))
 
     # --- Бокс дефекта (угловые маркеры + лейбл-тег) ---
     box = state.get("box")
     if defect and box:
         x1, y1, x2, y2 = box
-        # внешний «гало» с пульсом + чёткий внутренний контур
         glow = int(6 * ui)
-        _corner_box(frame, (x1 - glow, y1 - glow, x2 + glow, y2 + glow),
-                    RED, max(1, int(1.2 * ui)))
+        _corner_box(frame, (x1 - glow, y1 - glow, x2 + glow, y2 + glow), RED, max(1, int(2 * ui)))
         _corner_box(frame, box, (80, 75, 255), max(3, int(4 * ui)))
 
         tag = f"{state.get('label', 'DEFECT')}   {state.get('confidence', 0)}%"
-        ts = 0.7 * ui
-        tt = max(1, int(1.2 * ui))
-        tw = _tw(tag, ts, tt, FONT_H)
+        tag_px = 22
         pad = int(12 * ui)
-        ty2 = max(0, y1 - int(10 * ui))
+        ty2 = max(int(36 * ui), y1 - int(10 * ui))
         ty1 = ty2 - int(34 * ui)
-        tx1 = x1
-        tx2 = x1 + tw + pad * 2
-        _panel(frame, (tx1, ty1), (tx2, ty2), RED, 0.85)
-        _text(frame, tag, (tx1 + pad, ty2 - int(10 * ui)), ts, WHITE, tt, FONT_H)
+        _panel(frame, (x1, ty1), (x1 + tw(tag, tag_px) + pad * 2, ty2), RED, 0.85)
+        T(tag, x1 + pad, ty2 - int(11 * ui), tag_px, WHITE)
 
     # --- Верхняя панель ---
     top_h = int(66 * ui)
     _panel(frame, (0, 0), (w, top_h), DARK, 0.60)
-    cv2.line(frame, (0, top_h), (w, top_h), accent, max(1, int(1.2 * ui)))
+    cv2.line(frame, (0, top_h), (w, top_h), accent, max(1, int(2 * ui)))
 
     pad = int(28 * ui)
-    _text(frame, "AI QUALITY INSPECTOR", (pad, int(30 * ui)), 0.8 * ui, WHITE, max(1, int(1.2 * ui)), FONT_H)
-    brand_w = _tw("AI QUALITY INSPECTOR", 0.8 * ui, max(1, int(1.2 * ui)), FONT_H)
-    _text(frame, "MEAT DEFECT DETECTION", (pad, int(52 * ui)), 0.45 * ui, MUTE, 1, FONT_B)
-    # тонкий вертикальный разделитель после бренда
-    sep_x = pad + brand_w + int(24 * ui)
-    cv2.line(frame, (sep_x, int(16 * ui)), (sep_x, int(50 * ui)), (70, 70, 74), 1, cv2.LINE_AA)
+    title = "AI QUALITY INSPECTOR"
+    T(title, pad, int(34 * ui), 27, WHITE)
+    T("MEAT DEFECT DETECTION", pad, int(54 * ui), 14, MUTE)
+    sep_x = pad + tw(title, 27) + int(22 * ui)
+    cv2.line(frame, (sep_x, int(16 * ui)), (sep_x, int(50 * ui)), SEPCOL, 1, cv2.LINE_AA)
 
-    # правый кластер: LIVE • модель • время (выстраиваем справа налево)
+    # правый кластер: LIVE • модель • время (справа налево)
     x = w - pad
-    stamp = time.strftime("%Y-%m-%d  %H:%M:%S")
-    sw = _tw(stamp, 0.55 * ui, 1, FONT_B)
-    _text(frame, stamp, (x - sw, int(42 * ui)), 0.55 * ui, TXT, 1, FONT_B)
-    x -= sw + int(24 * ui)
-    cv2.line(frame, (x, int(16 * ui)), (x, int(50 * ui)), (70, 70, 74), 1, cv2.LINE_AA)
-    x -= int(24 * ui)
+    stamp = time.strftime("%Y-%m-%d   %H:%M:%S")
+    T(stamp, x - tw(stamp, 19), int(43 * ui), 19, TXT)
+    x -= tw(stamp, 19) + int(22 * ui)
+    cv2.line(frame, (x, int(16 * ui)), (x, int(50 * ui)), SEPCOL, 1, cv2.LINE_AA)
+    x -= int(22 * ui)
 
     model = f"MODEL  {state.get('model', 'N/A')}"
-    mw = _tw(model, 0.55 * ui, 1, FONT_B)
-    _text(frame, model, (x - mw, int(42 * ui)), 0.55 * ui, MUTE, 1, FONT_B)
-    x -= mw + int(24 * ui)
-    cv2.line(frame, (x, int(16 * ui)), (x, int(50 * ui)), (70, 70, 74), 1, cv2.LINE_AA)
-    x -= int(24 * ui)
+    T(model, x - tw(model, 19), int(43 * ui), 19, MUTE)
+    x -= tw(model, 19) + int(22 * ui)
+    cv2.line(frame, (x, int(16 * ui)), (x, int(50 * ui)), SEPCOL, 1, cv2.LINE_AA)
+    x -= int(22 * ui)
 
-    live = "LIVE"
-    lw = _tw(live, 0.6 * ui, max(1, int(1.2 * ui)), FONT_H)
-    _text(frame, live, (x - lw, int(43 * ui)), 0.6 * ui, WHITE, max(1, int(1.2 * ui)), FONT_H)
-    # пульсирующая красная точка LIVE (пульс радиусом, цвет строго красный)
+    lw = tw("LIVE", 21)
+    T("LIVE", x - lw, int(44 * ui), 21, WHITE)
     live_r = max(4, int((5 + 2 * pulse) * ui))
     _dot(frame, (x - lw - int(16 * ui), int(38 * ui)), RED, live_r)
 
     # --- Баннер тревоги (плавный пульс фона, без вкл/выкл мигания) ---
     if defect:
         msg = "DEFECT DETECTED"
-        bs = 0.95 * ui
-        bt2 = max(1, int(1.2 * ui))
-        bw = _tw(msg, bs, bt2, FONT_H)
-        bpad = int(26 * ui)
+        bpx = 32
+        bw = tw(msg, bpx)
+        bpad = int(28 * ui)
         bx1 = w // 2 - bw // 2 - bpad
         bx2 = w // 2 + bw // 2 + bpad
         by1 = top_h + int(20 * ui)
-        by2 = by1 + int(50 * ui)
+        by2 = by1 + int(52 * ui)
         _panel(frame, (bx1, by1), (bx2, by2), RED, 0.45 + 0.30 * pulse)
-        cv2.rectangle(frame, (bx1, by1), (bx2, by2), (90, 85, 255), max(1, int(1.2 * ui)))
-        _text(frame, msg, (w // 2 - bw // 2, by2 - int(16 * ui)), bs, WHITE, bt2, FONT_H)
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), (90, 85, 255), max(1, int(2 * ui)))
+        T(msg, w // 2 - bw // 2, by2 - int(16 * ui), bpx, WHITE)
 
     # --- Нижняя панель ---
     bot_h = int(58 * ui)
     by = h - bot_h
     _panel(frame, (0, by), (w, h), DARK, 0.60)
-    cv2.line(frame, (0, by), (w, by), accent, max(1, int(1.2 * ui)))
-    cy = by + int(37 * ui)
+    cv2.line(frame, (0, by), (w, by), accent, max(1, int(2 * ui)))
+    cy = by + int(38 * ui)
 
     # статус-чип слева
     if defect:
-        _dot(frame, (pad, cy - int(6 * ui)), RED, max(4, int(7 * ui)))
-        _text(frame, "ALERT  /  LINE STOP RECOMMENDED", (pad + int(20 * ui), cy),
-              0.6 * ui, (90, 90, 255), max(1, int(1.2 * ui)), FONT_H)
-        chip_w = _tw("ALERT  /  LINE STOP RECOMMENDED", 0.6 * ui, max(1, int(1.2 * ui)), FONT_H)
+        chip = "ALERT   /   LINE STOP RECOMMENDED"
+        chip_col = (90, 90, 255)
+        _dot(frame, (pad, cy - int(7 * ui)), RED, max(4, int(7 * ui)))
     else:
-        _dot(frame, (pad, cy - int(6 * ui)), GREEN, max(4, int(7 * ui)))
-        _text(frame, "MONITORING  /  QUALITY OK", (pad + int(20 * ui), cy),
-              0.6 * ui, GREEN, max(1, int(1.2 * ui)), FONT_H)
-        chip_w = _tw("MONITORING  /  QUALITY OK", 0.6 * ui, max(1, int(1.2 * ui)), FONT_H)
+        chip = "MONITORING   /   QUALITY OK"
+        chip_col = GREEN
+        _dot(frame, (pad, cy - int(7 * ui)), GREEN, max(4, int(7 * ui)))
+    chip_x = pad + int(22 * ui)
+    T(chip, chip_x, cy, 21, chip_col)
+    chip_w = tw(chip, 21)
 
     # метрики по центру-слева
-    mx = pad + int(20 * ui) + chip_w + int(40 * ui)
+    mx = chip_x + chip_w + int(44 * ui)
     metrics = [
         ("DEFECTS", str(state.get("defects_found", 0)), RED if defect else TXT),
         ("FPS", str(state.get("fps", 0)), AMBER),
         ("FRAME", str(state.get("frame_idx", 0)), MUTE),
     ]
     for name, val, col in metrics:
-        _text(frame, name, (mx, by + int(24 * ui)), 0.42 * ui, MUTE, 1, FONT_B)
-        _text(frame, val, (mx, by + int(46 * ui)), 0.6 * ui, col, max(1, int(1.2 * ui)), FONT_B)
-        seg = max(_tw(name, 0.42 * ui), _tw(val, 0.6 * ui, max(1, int(1.2 * ui)))) + int(34 * ui)
+        T(name, mx, by + int(25 * ui), 13, MUTE)
+        T(val, mx, by + int(47 * ui), 21, col)
+        seg = max(tw(name, 13), tw(val, 21)) + int(36 * ui)
         cv2.line(frame, (mx + seg - int(18 * ui), by + int(12 * ui)),
-                 (mx + seg - int(18 * ui), h - int(12 * ui)), (70, 70, 74), 1, cv2.LINE_AA)
+                 (mx + seg - int(18 * ui), h - int(12 * ui)), SEPCOL, 1, cv2.LINE_AA)
         mx += seg
 
     # AI-движок справа
-    eng = "AI ENGINE"
-    ew = _tw(eng, 0.55 * ui, 1, FONT_B)
-    aw = _tw("ACTIVE", 0.55 * ui, max(1, int(1.2 * ui)), FONT_H)
+    aw = tw("ACTIVE", 19)
     rx = w - pad - aw
-    _text(frame, "ACTIVE", (rx, cy), 0.55 * ui, GREEN, max(1, int(1.2 * ui)), FONT_H)
-    _dot(frame, (rx - int(14 * ui), cy - int(5 * ui)), GREEN, max(3, int(5 * ui)))
-    _text(frame, eng, (rx - int(14 * ui) - int(10 * ui) - ew, cy), 0.55 * ui, MUTE, 1, FONT_B)
+    T("ACTIVE", rx, cy, 19, GREEN)
+    _dot(frame, (rx - int(14 * ui), cy - int(6 * ui)), GREEN, max(3, int(5 * ui)))
+    ew = tw("AI ENGINE", 19)
+    T("AI ENGINE", rx - int(14 * ui) - int(10 * ui) - ew, cy, 19, MUTE)
+
+    # --- Один проход Pillow: накладываем весь текст поверх геометрии ---
+    if texts:
+        pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil)
+        for s, org, font, rgb, stroke in texts:
+            draw.text(org, s, font=font, fill=rgb, anchor="ls",
+                      stroke_width=stroke, stroke_fill=rgb)
+        frame[:] = cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
