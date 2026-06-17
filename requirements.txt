@@ -3,3 +3,4 @@ requests
 numpy
 flask
 python-dotenv
+Pillow
