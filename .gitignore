@@ -43,6 +43,8 @@ app.log
 # Media Output (Too large for Git)
 production.mp4
 production_with_realistic_defects.mp4
+production_fish_marel.mp4
+_defect_frames/
 # Keep presentation_video.mp4 as it's the demo:
 !presentation_video.mp4
 
