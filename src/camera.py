@@ -51,6 +51,15 @@ class CameraStream:
             
         return frame
 
+    def get_frame_index(self):
+        """Индекс кадра, возвращённого последним read().
+
+        cv2 после read() ставит POS_FRAMES на СЛЕДУЮЩИЙ кадр, поэтому текущий =
+        pos - 1. Нужно для ground-truth lookup в манифесте дефектов.
+        """
+        pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+        return max(0, pos - 1)
+
     def stop(self):
         """
         Release resources.

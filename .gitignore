@@ -45,6 +45,13 @@ production.mp4
 production_with_realistic_defects.mp4
 production_fish_marel.mp4
 _defect_frames/
+
+# Source media for README (large / regenerable) — assets/ kept, see below
+example.mp4
+example.jpg
+
+# Verification renders (regenerable via verify_hud.py)
+_verify_*.png
 # Keep presentation_video.mp4 as it's the demo:
 !presentation_video.mp4
 
