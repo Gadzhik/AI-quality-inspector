@@ -80,8 +80,11 @@
 ├── main.py                       # Точка входа: видеопоток + детекция + HUD
 ├── create_realistic_defects.py   # Генератор демо-видео + ground-truth манифеста
 ├── verify_hud.py                 # Headless-рендер HUD в PNG для визуальной проверки
+├── prepare_training_json.py      # Сборка датасета в metadata.jsonl (HuggingFace)
 ├── requirements.txt
 ├── assets/                       # Превью и скриншоты для README
+├── docs/
+│   └── fine-tuning.md            # Руководство по дообучению модели
 └── src/
     ├── camera.py                 # Захват видео (файл / RTSP), индексация кадров
     ├── analyzer.py               # VLM-движок (LM Studio, gemma-4-12b-qat)
@@ -148,7 +151,16 @@ camera = CameraStream(src="rtsp://admin:password@192.168.1.100:554/stream1").sta
 
 - **Python 3.10+**, **OpenCV** — видеопоток и UI.
 - **Vision-Language модель** `google/gemma-4-12b-qat` через **LM Studio** (локально, OpenAI-совместимый API).
+- **Pillow** — отрисовка TTF-текста HUD (Bahnschrift / DIN 1451).
 - **NumPy** — обработка изображений.
+
+## 🎓 Дообучение модели
+
+Как перейти от демо к реальной детекции — собрать данные, разметить, обучить
+(Few-Shot / LoRA-fine-tuning VLM / YOLO) и вернуть модель в систему — подробно
+описано в отдельном руководстве:
+
+**→ [docs/fine-tuning.md](docs/fine-tuning.md)**
 
 ## 📈 Ограничения и перспективы
 
@@ -156,7 +168,7 @@ camera = CameraStream(src="rtsp://admin:password@192.168.1.100:554/stream1").sta
 цеха промышленные GPU (NVIDIA A100 и мощнее) позволят:
 
 - Запускать тяжёлые модели с высоким контекстом внимания в реальном времени.
-- Проводить полноценное дообучение (**Full Fine-tuning**) на тысячах спецификаций дефектов.
+- Проводить полноценное дообучение (**Full Fine-tuning**) на тысячах спецификаций дефектов — см. [руководство по дообучению](docs/fine-tuning.md).
 - Добиться мгновенной классификации даже на высокой скорости конвейера — напрямую через VLM, без манифеста.
 
 ---
