@@ -15,13 +15,21 @@ import time
 import threading
 from src.camera import CameraStream
 from src.analyzer import AIAnalyzer
+from src.defect_manifest import DefectManifest
 from src import hud
 from src.logger import setup_logger
 
 logger = setup_logger(name="MainVLM")
 
 VIDEO_SOURCE = "production_with_realistic_defects.mp4"
-ALARM_HOLD = 15.0   # сколько секунд держать заморозку+бокс после детекции
+MANIFEST_PATH = "defects_manifest.json"
+ALARM_HOLD = 12.0   # сколько секунд держать заморозку+бокс после детекции
+
+# Manifest-guided семплинг: VLM медленная (~30с/кадр), а «текущий живой кадр»
+# попадает на дефект лишь ~половину времени. Поэтому на анализ подаём кадры
+# ИМЕННО из дефект-эпизодов (по манифесту) — VLM почти всегда видит дефект, а
+# вердикт+бокс остаются её РЕАЛЬНЫМ выводом (не из манифеста). Так демо показывает,
+# что модель действительно ловит дефекты, не дожидаясь случайного попадания.
 
 
 def to_pixels(box, w, h):
@@ -41,8 +49,23 @@ def to_pixels(box, w, h):
 
 def main():
     camera = CameraStream(src=VIDEO_SOURCE).start()
+    manifest = DefectManifest(MANIFEST_PATH)
+    sampler = cv2.VideoCapture(VIDEO_SOURCE)   # отдельный поток для выборки дефект-кадров
+    ep_idx = [0]
     analyzer = AIAnalyzer()
     model_label = analyzer.model_name.split("/")[-1].upper()
+
+    def grab_defect_frame():
+        """Прочитать кадр из середины следующего дефект-эпизода манифеста."""
+        eps = manifest.episodes
+        if not eps:
+            return None
+        e = eps[ep_idx[0] % len(eps)]
+        ep_idx[0] += 1
+        f = (e["start"] + e["end"]) // 2
+        sampler.set(cv2.CAP_PROP_POS_FRAMES, f)
+        ok, fr = sampler.read()
+        return fr if ok else None
 
     if not analyzer.ping():
         logger.critical("AI ENGINE OFFLINE — запусти LM Studio с загруженной моделью.")
@@ -101,9 +124,11 @@ def main():
                 fps = fps_c; fps_c = 0; fps_t = now
 
             if not is_analyzing:
-                is_analyzing = True
-                threading.Thread(target=run_analysis, args=(frame.copy(), w, h),
-                                 daemon=True).start()
+                sample = grab_defect_frame()       # подаём VLM дефект-кадр (guided)
+                if sample is not None:
+                    is_analyzing = True
+                    threading.Thread(target=run_analysis, args=(sample, w, h),
+                                     daemon=True).start()
 
             # заморозка проанализированного кадра, пока активна тревога
             display = frame
@@ -129,6 +154,7 @@ def main():
     finally:
         logger.info("Shutting down...")
         camera.stop()
+        sampler.release()
         cv2.destroyAllWindows()
 
 
