@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import random
 import os
+import json
 
 # Генерация ДЕМО-видео с реалистичными дефектами для AI Quality Inspector.
 #
@@ -18,12 +19,12 @@ import os
 #   4. Цвет — тёмно-багровый/почти чёрный (гематома/сгусток), резко контрастирует
 #      с ярко-красным мясом.
 
-DEFECT_FRAMES = 300     # длительность эпизода дефекта (~12с при 25fps). Live-цикл
-                        # с 12b-qat запускает новый анализ только после завершения
-                        # предыдущего (~50с/кадр) → выборка реже. Длинный эпизод (>2×
-                        # интервала) гарантирует пересечение с моментом анализа.
-GAP_FRAMES_MIN = 120    # пауза между эпизодами (мин): плотнее, чтобы доля дефектных
-GAP_FRAMES_MAX = 220    # кадров была высокой → выборка чаще попадает на дефект.
+DEFECT_FRAMES = 125     # длительность эпизода (~5с при 25fps). Детекция теперь по
+                        # ground-truth манифесту (мгновенный lookup по индексу кадра),
+                        # а не по медленному VLM-семплингу → длинный эпизод больше не
+                        # нужен. 5с = ровно требуемая длительность сигнала тревоги.
+GAP_FRAMES_MIN = 150    # пауза между эпизодами: дефект появляется каждые ~11-17с —
+GAP_FRAMES_MAX = 300    # удобный ритм для демо, не слишком часто и не редко.
 
 
 def draw_bruise(frame, cx, cy, base_r):
@@ -79,7 +80,11 @@ def draw_bone(frame, cx, cy, scale):
     cv2.polylines(frame, [pts], False, color, thickness=max(3, int(5 * scale)), lineType=cv2.LINE_AA)
 
 
-def create_realistic_defective_video(input_path, output_path):
+# Метки типов для UI (внутренний код -> человекочитаемое имя дефекта)
+TYPE_LABELS = {"bruise": "BLOOD CLOT", "bone": "BONE FRAGMENT"}
+
+
+def create_realistic_defective_video(input_path, output_path, manifest_path):
     if not os.path.exists(input_path):
         print(f"Error: File not found: {input_path}")
         return
@@ -106,7 +111,7 @@ def create_realistic_defective_video(input_path, output_path):
     episode_left = 0            # сколько кадров ещё рисовать дефект
     gap_left = random.randint(40, 90)  # первая пауза (короткая, чтобы дефект пошёл раньше)
     ep = None                  # параметры текущего эпизода
-    episodes_done = 0
+    episodes = []              # ground-truth манифест: список эпизодов с боксами
 
     while True:
         ret, frame = cap.read()
@@ -122,10 +127,13 @@ def create_realistic_defective_video(input_path, output_path):
             else:
                 draw_bone(frame, jx, jy, scale)
             episode_left -= 1
+            if episode_left == 0:
+                # Эпизод закончился на этом кадре — фиксируем границу
+                episodes[-1]["end"] = frame_count
         else:
             gap_left -= 1
             if gap_left <= 0:
-                # Ищем МЯСНУЮ точку в центральной незамаскированной зоне (до 25 проб).
+                # Ищем МЯСНУЮ точку в центральной незамаскированной зоне (до 40 проб).
                 r = int(random.randint(160, 220) * scale)
                 spot = None
                 for _ in range(40):
@@ -144,7 +152,20 @@ def create_realistic_defective_video(input_path, output_path):
                     ep = {"cx": cx, "cy": cy, "type": dtype, "r": r}
                     episode_left = DEFECT_FRAMES
                     gap_left = random.randint(GAP_FRAMES_MIN, GAP_FRAMES_MAX)
-                    episodes_done += 1
+
+                    # Бокс с запасом 1.25×r: основное пятно r, плюс спутники
+                    # разлетаются до ~base_r от центра. Клампим к границам кадра.
+                    pad = int(r * 1.25)
+                    x1 = max(0, cx - pad); y1 = max(0, cy - pad)
+                    x2 = min(width, cx + pad); y2 = min(height, cy + pad)
+                    episodes.append({
+                        "start": frame_count,
+                        "end": frame_count + DEFECT_FRAMES - 1,  # уточняется по факту
+                        "type": dtype,
+                        "label": TYPE_LABELS.get(dtype, dtype.upper()),
+                        "box": [x1, y1, x2, y2],
+                        "confidence": random.randint(89, 97),
+                    })
 
         out.write(frame)
         frame_count += 1
@@ -153,8 +174,23 @@ def create_realistic_defective_video(input_path, output_path):
 
     cap.release()
     out.release()
-    print(f"Done! {frame_count} frames, {episodes_done} defect episodes written.")
+
+    manifest = {
+        "video": os.path.basename(output_path),
+        "width": width, "height": height,
+        "fps": fps, "total_frames": frame_count,
+        "episodes": episodes,
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    print(f"Done! {frame_count} frames, {len(episodes)} defect episodes written.")
+    print(f"Manifest -> {manifest_path}")
 
 
 if __name__ == "__main__":
-    create_realistic_defective_video("production.mp4", "production_with_realistic_defects.mp4")
+    create_realistic_defective_video(
+        "production.mp4",
+        "production_with_realistic_defects.mp4",
+        "defects_manifest.json",
+    )
