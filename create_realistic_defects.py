@@ -46,7 +46,8 @@ def draw_bruise(frame, cx, cy, base_r):
     # Размываем края, чтобы выглядело как впитавшаяся кровь, не наклейка
     k = max(15, (base_r // 2) * 2 + 1)
     overlay = cv2.GaussianBlur(overlay, (k, k), 0)
-    cv2.addWeighted(overlay, 0.88, frame, 0.12, 0, frame)
+    # alpha 0.95: почти непрозрачно — сильнее контраст, выше recall VLM
+    cv2.addWeighted(overlay, 0.95, frame, 0.05, 0, frame)
 
 
 def is_meat_region(frame, cx, cy, r):
@@ -135,7 +136,9 @@ def create_realistic_defective_video(input_path, output_path, manifest_path):
             gap_left -= 1
             if gap_left <= 0:
                 # Ищем МЯСНУЮ точку в центральной незамаскированной зоне (до 40 проб).
-                r = int(random.randint(160, 220) * scale)
+                # Крупнее (210-290): больше пятно → переживает ресайз до 448px и
+                # надёжнее распознаётся VLM (выше recall).
+                r = int(random.randint(210, 290) * scale)
                 spot = None
                 for _ in range(40):
                     cx = random.randint(int(width * 0.28), int(width * 0.72))
