@@ -93,7 +93,11 @@ def main():
             gray_frame = cv2.cvtColor(analysis_frame, cv2.COLOR_BGR2GRAY)
             blur_val = cv2.Laplacian(gray_frame, cv2.CV_64F).var()
             
-            if blur_val >= 40:
+            # Порог низкий (2.5): исходное видео — сильно motion-blur, мясо-кадры
+            # имеют var~3-6, а title/логотипы — var 40-892. Старый порог 40 пропускал
+            # ТОЛЬКО резкие титры → анализатор никогда не видел дефекты на мясе.
+            # >=2.5 отсекает только чёрные/замороженные кадры переходов.
+            if blur_val >= 2.5:
                 frame_buffer.append((blur_val, analysis_frame))
                 if len(frame_buffer) > 5:
                     frame_buffer.pop(0)
@@ -106,9 +110,11 @@ def main():
                 is_analyzing = True
                 last_analysis_time = current_time
                 
-                # Пул из 5 последних кадров: выбираем самый четкий
-                best_blur_val, best_frame = max(frame_buffer, key=lambda x: x[0])
-                logger.info(f"Selected frame from 5-frame buffer with var={best_blur_val:.1f}")
+                # Берём САМЫЙ СВЕЖИЙ кадр, а не самый резкий: max-var на этом footage
+                # систематически выбирал title/логотипы (резкие) и обходил мясо.
+                # Свежий кадр репрезентативен — мясо доминирует на таймлайне.
+                best_blur_val, best_frame = frame_buffer[-1]
+                logger.info(f"Selected latest buffered frame with var={best_blur_val:.1f}")
                 
                 # Очищаем буфер для новой серии
                 frame_buffer.clear()
@@ -146,6 +152,11 @@ def main():
                                 current_status["last_defect_time"] = time.time()
                                 current_status["last_completed_time"] = time.time()
                                 current_status["inference_time"] = round(float(ai_time_taken), 2)
+                                # Замораживаем ИМЕННО проанализированный кадр + держим
+                                # алярм 20с: бокс рисуется на этом snapshot → совпадает
+                                # с пятном (живое видео уехало бы за 45с инференса).
+                                current_status["snapshot_frame"] = captured_frame.copy()
+                                current_status["alarm_end_time"] = time.time() + 20.0
                             else:
                                 current_status["consecutive_defects"] = 0
                                 current_status["consecutive_clean"] += 1
@@ -164,7 +175,13 @@ def main():
 
             # Visualization
             height, width = frame.shape[:2]
-            
+
+            # Во время алярма показываем ЗАМОРОЖЕННЫЙ проанализированный кадр (snapshot),
+            # чтобы красный бокс лёг точно на дефект, а не на уехавшее живое видео.
+            if current_status["defect"] and current_status.get("snapshot_frame") is not None \
+                    and current_time <= current_status.get("alarm_end_time", 0):
+                frame = current_status["snapshot_frame"].copy()
+
             if current_status.get("few_shot", False):
                 text_size = cv2.getTextSize("MODE: FEW-SHOT (AI LEARNING)", cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
                 cv2.rectangle(frame, (width//2 - text_size[0]//2 - 10, 10), (width//2 + text_size[0]//2 + 10, 40), (0, 0, 0), -1)
@@ -176,9 +193,9 @@ def main():
                 cv2.circle(frame, (width - 190, 25), 6, (0, 255, 255), -1)
                 cv2.putText(frame, "NETWORK LAG", (width - 170, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             elif current_status["defect"]:
-                if current_time - current_status.get("last_defect_time", 0) > 3.0:
+                if current_time > current_status.get("alarm_end_time", 0):
                     current_status["defect"] = False
-                    
+
                 if current_status["defect"]:
                     # Solid Red Alert logic, thickness 2, margin 1
                     cv2.rectangle(frame, (1, 1), (width - 1, height - 1), (0, 0, 255), 2)
@@ -189,12 +206,20 @@ def main():
                         try:
                             if len(box) == 4:
                                 ymin, xmin, ymax, xmax = box
-                                
-                                # Handle both normalized [0..1] and absolute [0..448] coordinates
-                                x1_b = int(xmin * width) if xmax <= 1.0 else int(xmin * (width / 448.0))
-                                y1_b = int(ymin * height) if ymax <= 1.0 else int(ymin * (height / 448.0))
-                                x2_b = int(xmax * width) if xmax <= 1.0 else int(xmax * (width / 448.0))
-                                y2_b = int(ymax * height) if ymax <= 1.0 else int(ymax * (height / 448.0))
+
+                                # Определяем шкалу координат по максимальному значению:
+                                #   <= 1.0  -> нормализовано [0..1]
+                                #   <= 448  -> абсолют в 448px превью
+                                #   иначе   -> шкала 0..1000 (конвенция Gemma)
+                                max_coord = max(ymin, xmin, ymax, xmax)
+                                if max_coord <= 1.0:
+                                    x1_b, x2_b = int(xmin * width), int(xmax * width)
+                                    y1_b, y2_b = int(ymin * height), int(ymax * height)
+                                else:
+                                    denom = 448.0 if max_coord <= 448 else 1000.0
+                                    x1_b, x2_b = int(xmin / denom * width), int(xmax / denom * width)
+                                    y1_b, y2_b = int(ymin / denom * height), int(ymax / denom * height)
+
                                 cv2.rectangle(frame, (x1_b, y1_b), (x2_b, y2_b), (0, 0, 255), 3)
                         except Exception:
                             pass
@@ -232,7 +257,8 @@ def main():
             
             time_since_last = current_time - current_status["last_completed_time"]
             cv2.putText(frame, f"Last update: {int(time_since_last)}s ago", (10, int(height - 100)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
-            cv2.putText(frame, "Model: Qwen3-VL-8B", (10, int(height - 70)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            model_label = analyzer.model_name.split("/")[-1].upper()
+            cv2.putText(frame, f"Model: {model_label}", (10, int(height - 70)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(frame, f"FPS: {fps}", (10, int(height - 40)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             inference_time = current_status.get("inference_time", 0)

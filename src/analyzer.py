@@ -19,7 +19,7 @@ class AIAnalyzer:
     """
     Class to analyze images using a local Ollama instance (Llava model).
     """
-    def __init__(self, model_name: str = "qwen/qwen3-vl-8b"):
+    def __init__(self, model_name: str = "google/gemma-4-12b-qat"):
         self.model_name = model_name
         self.endpoint_url = "http://localhost:1234/v1"
         self.dataset_dir = "dataset"
@@ -134,31 +134,23 @@ class AIAnalyzer:
         # Передаем кадр с маской, сжимая его до 448x448
         resized_frame = cv2.resize(masked_frame, (448, 448))
 
-        # Усиление контраста красных оттенков (CLAHE в LAB пространстве)
+        # Мягкое усиление локального контраста (CLAHE по L-каналу LAB).
+        # Делает тёмные сгустки/кровоподтёки заметнее НЕ перекрашивая нормальное мясо.
+        # ВАЖНО: НЕ бустим насыщенность красного — это превращало обычную говядину
+        # в "кровь" и давало массовые ложные срабатывания. Дефекты-сгустки тёмные,
+        # их выявляет контраст, а не насыщенность.
         lab = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8,8))
         cl = clahe.apply(l)
-        limg = cv2.merge((cl,a,b))
+        limg = cv2.merge((cl, a, b))
         enhanced_frame = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
 
-        # Увеличение насыщенности (HSV) для выявления крови
-        hsv = cv2.cvtColor(enhanced_frame, cv2.COLOR_BGR2HSV)
-        h, s, v = cv2.split(hsv)
-        s = cv2.addWeighted(s, 1.5, 0, 0, 0)
-        hsv = cv2.merge((h, s, v))
-        enhanced_frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-        
-        # Цветовой фильтр (Preprocessing) alpha=1.2, beta=10
-        enhanced_frame = cv2.convertScaleAbs(enhanced_frame, alpha=1.2, beta=10)
+        # Лёгкое повышение резкости (unsharp mask), мягче чем агрессивное ядро 9.
+        blur = cv2.GaussianBlur(enhanced_frame, (0, 0), 3)
+        sharpened_frame = cv2.addWeighted(enhanced_frame, 1.3, blur, -0.3, 0)
 
-        # Повышение резкости через cv2.filter2D с ядром
-        kernel = np.array([[-1, -1, -1],
-                           [-1,  9, -1],
-                           [-1, -1, -1]])
-        sharpened_frame = cv2.filter2D(enhanced_frame, -1, kernel)
-
-        _, buffer = cv2.imencode('.jpg', sharpened_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        _, buffer = cv2.imencode('.jpg', sharpened_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         return base64.b64encode(buffer).decode('utf-8')
 
     def analyze_frame(self, frame: np.ndarray) -> dict:
@@ -178,25 +170,33 @@ You are provided with a 'Current Frame' of a beef carcass and 'Reference' images
 Reference (Negative): Look at the RED BOXES. They mark dark blood clots and bruises. This is your target pattern.
 Reference (Positive): Shows clean meat. Use this to understand the normal texture.
 
+CRITICAL CONTEXT - AVOID FALSE ALARMS:
+Raw beef is NATURALLY deep red and has visible muscle striations, marbling and glossy wet surface.
+Normal red meat, normal fat (white/cream), and natural color variation are NOT defects.
+A defect is a DISTINCT, well-bounded ABNORMALITY that clearly stands out from surrounding tissue:
+a dark purple/black blood clot, a deep bruise, or a foreign fragment (bone splinter).
+When in doubt, the product is CLEAN. Only report a defect if you are clearly confident.
+
 Execution Rules:
-Scan the 'Current Frame' ONLY for biological defects (dark purple/black spots) on the meat surface.
-ABSOLUTELY IGNORE: Shiny metal equipment, hooks, blue uniforms of workers, and any text overlays like 'QUALITY OK'.
-If a spot is on the metal or equipment, it is NOT a defect.
+Scan the 'Current Frame' ONLY for the abnormalities described above on the meat surface.
+ABSOLUTELY IGNORE: shiny metal equipment, hooks, blue uniforms of workers, conveyor belts,
+shadows, and any text overlays like 'QUALITY OK'. A spot on metal/equipment is NOT a defect.
+
+Coordinates:
+Boxes use a normalized 0-1000 scale relative to the image (0=top/left, 1000=bottom/right),
+format [ymin, xmin, ymax, xmax]. Make each box tight around the single defect.
 
 Output Format:
 Return ONLY a raw JSON object. No conversation, no markdown blocks, no 'here is your result'.
 
-JSON Structure:
-{
-  "defect": true,
-  "boxes": [[ymin, xmin, ymax, xmax]],
-  "confidence": 100,
-  "reason": "blood_clot_found"
-}
-If no biological defect is found on the meat, return:
-{"defect": false, "boxes": [], "confidence": 100}"""
+JSON Structure (defect present):
+{"defect": true, "boxes": [[ymin, xmin, ymax, xmax]], "confidence": 85, "reason": "blood_clot"}
+If the meat is clean / no clear defect, return:
+{"defect": false, "boxes": [], "confidence": 95}"""
 
-            user_prompt = "Analyze this beef carcass. Output ONLY JSON."
+            user_prompt = ("The first image(s) are REFERENCE examples only. "
+                           "The LAST image labeled 'CURRENT FRAME' is the one to inspect. "
+                           "Do NOT explain or think out loud. Your entire reply must be the JSON object only.")
 
             content_array = [
                 {
@@ -247,7 +247,11 @@ If no biological defect is found on the meat, return:
                 except Exception as e:
                     logger.error(f"Error processing pos ref image: {e}")
 
-            # Attach current frame
+            # Attach current frame (явно помечаем, чтобы модель не путала с эталонами)
+            content_array.append({
+                "type": "text",
+                "text": "=== CURRENT FRAME (analyze THIS one, output JSON only) ==="
+            })
             content_array.append({
                 "type": "image_url",
                 "image_url": {
@@ -269,7 +273,36 @@ If no biological defect is found on the meat, return:
                 ],
                 "stream": False,
                 "temperature": 0.0,
-                "max_tokens": 150
+                "max_tokens": 500,
+                # Отключаем "размышления" reasoning-модели (Gemma 4): иначе она тратит
+                # 40-80с на цепочку рассуждений, иногда обрезает JSON и чаще ошибается.
+                # Дублируем два механизма — LM Studio для Gemma не всегда уважает один:
+                #   chat_template_kwargs.enable_thinking + reasoning_effort=low.
+                # С выключенным thinking — прямой JSON в content за ~7-10с.
+                "chat_template_kwargs": {"enable_thinking": False},
+                "reasoning_effort": "low",
+                # Принуждаем модель к строгому JSON по схеме (LM Studio grammar).
+                # Убирает нарратив/«мысли» в content -> всегда парсится, стабильно ~10с.
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "defect_report",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "defect": {"type": "boolean"},
+                                "boxes": {
+                                    "type": "array",
+                                    "items": {"type": "array", "items": {"type": "number"}}
+                                },
+                                "confidence": {"type": "integer"},
+                                "reason": {"type": "string"}
+                            },
+                            "required": ["defect", "boxes", "confidence", "reason"]
+                        }
+                    }
+                }
             }
 
             url = f"{self.endpoint_url}/chat/completions"
@@ -294,11 +327,16 @@ If no biological defect is found on the meat, return:
                     logger.error(f"Vision Adapter not active in LM Studio. Raw API response: {res_json}")
                     return {"error": True}
                     
-                content = choices[0].get("message", {}).get("content", "")
-                if not content:
-                    logger.error("Vision Adapter not active in LM Studio. Empty content received.")
+                message = choices[0].get("message", {})
+                content = message.get("content", "") or ""
+                # Reasoning-модели (Gemma 4 и т.п.) могут вернуть пустой content,
+                # положив весь ответ (включая JSON) в reasoning_content. Берём оттуда.
+                if not content.strip():
+                    content = message.get("reasoning_content", "") or ""
+                if not content.strip():
+                    logger.error(f"Empty content and reasoning. Vision Adapter inactive? Raw: {res_json}")
                     return {"error": True}
-                    
+
                 content = content.lower()
                 
                 try:
