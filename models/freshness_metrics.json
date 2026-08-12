@@ -1,0 +1,47 @@
+{
+  "val": {
+    "n": 490,
+    "accuracy": 1.0,
+    "precision_spoiled": 1.0,
+    "recall_spoiled": 1.0,
+    "f1_spoiled": 1.0,
+    "tp": 244,
+    "tn": 246,
+    "fp": 0,
+    "fn": 0
+  },
+  "test_holdout_no_leak": {
+    "n": 818,
+    "accuracy": 1.0,
+    "precision_spoiled": 1.0,
+    "recall_spoiled": 1.0,
+    "f1_spoiled": 1.0,
+    "tp": 414,
+    "tn": 404,
+    "fp": 0,
+    "fn": 0
+  },
+  "independent_other_study": {
+    "n": 60,
+    "accuracy": 0.65,
+    "precision_spoiled": 0.8462,
+    "recall_spoiled": 0.3667,
+    "f1_spoiled": 0.5116,
+    "tp": 11,
+    "tn": 28,
+    "fp": 2,
+    "fn": 19
+  },
+  "_meta": {
+    "arch": "resnet18",
+    "epochs": 12,
+    "best_epoch": 7,
+    "images": 3268,
+    "clusters": 425,
+    "train_size": 1960,
+    "seed": 42,
+    "train_seconds": 53,
+    "img_size": 224,
+    "jitter": 0.5
+  }
+}

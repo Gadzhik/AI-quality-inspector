@@ -1,11 +1,13 @@
 """Демо-плеер в РЕАЛЬНОМ VLM-режиме (без манифеста).
 
 Детекция идёт через живой инференс LM Studio (`analyzer.analyze_frame`), а не по
-ground-truth манифесту. VLM тяжёлая (~45-77 с/кадр), поэтому:
+ground-truth манифесту. Инференс всё ещё не бесплатный (~3 с/кадр на qwen3-vl-8b
+и RTX 3070 Ti; раньше на слабом железе с gemma-4-12b было 45-77 с), поэтому:
   - анализ крутится в фоновом потоке (frame-skip: новый старт только после
     завершения предыдущего);
   - при дефекте замораживаем проанализированный кадр (snapshot), чтобы красный
-    бокс лёг точно на пятно, а не на уехавшее за минуту живое видео.
+    бокс лёг точно на пятно, а не на уехавшее за это время живое видео;
+  - рамку от VLM уточняем пиксельно (`src/box_refine.py`).
 
 Требует запущенный LM Studio с загруженной vision-моделью (см. README).
 Демо-режим без VLM — `main.py`.
@@ -16,6 +18,7 @@ import threading
 from src.camera import CameraStream
 from src.analyzer import AIAnalyzer
 from src.defect_manifest import DefectManifest
+from src import box_refine
 from src import hud
 from src.logger import setup_logger
 
@@ -23,13 +26,18 @@ logger = setup_logger(name="MainVLM")
 
 VIDEO_SOURCE = "production_with_realistic_defects.mp4"
 MANIFEST_PATH = "defects_manifest.json"
-ALARM_HOLD = 12.0   # сколько секунд держать заморозку+бокс после детекции
+ALARM_HOLD = 6.0    # сколько секунд держать заморозку+бокс после детекции
+                    # (инференс ~3 с, дольше держать смысла нет)
 
-# Manifest-guided семплинг: VLM медленная (~30с/кадр), а «текущий живой кадр»
-# попадает на дефект лишь ~половину времени. Поэтому на анализ подаём кадры
-# ИМЕННО из дефект-эпизодов (по манифесту) — VLM почти всегда видит дефект, а
-# вердикт+бокс остаются её РЕАЛЬНЫМ выводом (не из манифеста). Так демо показывает,
-# что модель действительно ловит дефекты, не дожидаясь случайного попадания.
+# Manifest-guided семплинг ВЫКЛЮЧЕН (2026-08-12).
+# Он был нужен, пока инференс занимал ~30-50 с на кадр: за такое время «случайный
+# живой кадр» слишком редко попадал на дефект, и демо выглядело так, будто модель
+# ничего не находит. Поэтому на анализ подавались кадры из середины дефект-эпизодов
+# по манифесту (вердикт и бокс при этом оставались реальным выводом модели).
+# На qwen3-vl-8b инференс ~3 с, и плеер успевает анализировать ЖИВОЙ поток —
+# подсказка из манифеста больше не нужна, демо стало честнее.
+# Поставь True, если гоняешь тяжёлую модель и нужен гарантированный показ.
+GUIDED_SAMPLING = False
 
 
 def to_pixels(box, w, h):
@@ -94,6 +102,23 @@ def main():
             is_def = raw in (True, "true", "blood clot", "blood_clot")
             if is_def:
                 box = to_pixels((res.get("boxes") or [[]])[0], w, h)
+                # VLM надёжно говорит ЧТО нашла, но плохо — ГДЕ (замер: бокс попадал
+                # на пятно 0-2 раза из 9). Уточняем рамку по пикселям; если пятно не
+                # найдено (например, костный фрагмент — он светлый), остаётся бокс VLM.
+                refined = box_refine.refine(captured, box)
+                if refined:
+                    logger.info(f"box refined {box} -> {refined}")
+                    box = refined
+                elif not box_refine.on_meat(captured, box):
+                    # Пятно не найдено И бокс модели указывает не на мясо (обычно
+                    # это бордовый фартук мясника или красная плитка) — тревогу
+                    # гасим. Замер на 18 кадрах: ложные тревоги 4/9 -> 1/9,
+                    # детекция 9/9 -> 6/9, но из 6 у 5 рамка точно на дефекте.
+                    # Лучше не показать сомнительный дефект, чем обвести фартук.
+                    logger.info(f"suppressed: box {box} не на мясе")
+                    st["clean_streak"] += 1
+                    st.update(defect=False, box=None, snapshot=None)
+                    return
                 label = (res.get("reason") or res.get("type") or "DEFECT").upper().replace("_", " ")
                 st.update(defect=True, label=label,
                           confidence=int(res.get("confidence", 0)),
@@ -124,7 +149,9 @@ def main():
                 fps = fps_c; fps_c = 0; fps_t = now
 
             if not is_analyzing:
-                sample = grab_defect_frame()       # подаём VLM дефект-кадр (guided)
+                # По умолчанию анализируем ЖИВОЙ кадр; guided-режим — только если
+                # включён вручную под тяжёлую модель (см. GUIDED_SAMPLING).
+                sample = grab_defect_frame() if GUIDED_SAMPLING else frame.copy()
                 if sample is not None:
                     is_analyzing = True
                     threading.Thread(target=run_analysis, args=(sample, w, h),

@@ -159,11 +159,20 @@ def render(frame, state):
     cv2.line(frame, (0, by), (w, by), accent, max(1, int(2 * ui)))
     cy = by + int(38 * ui)
 
-    # статус-чип слева
+    # статус-чип слева.
+    # `status` позволяет вызывающему коду сказать что-то третье помимо
+    # «тревога» / «всё хорошо». Это не украшение: классификатор свежести умеет
+    # отвечать «в кадре нет образца», и показывать в этот момент QUALITY OK —
+    # значит выдавать отсутствие анализа за успешную проверку.
+    override = state.get("status")
     if defect:
         chip = "ALERT   /   LINE STOP RECOMMENDED"
         chip_col = (90, 90, 255)
         _dot(frame, (pad, cy - int(7 * ui)), RED, max(4, int(7 * ui)))
+    elif override:
+        chip = override
+        chip_col = AMBER
+        _dot(frame, (pad, cy - int(7 * ui)), AMBER, max(4, int(7 * ui)))
     else:
         chip = "MONITORING   /   QUALITY OK"
         chip_col = GREEN

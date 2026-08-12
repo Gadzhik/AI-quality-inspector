@@ -34,17 +34,26 @@ venv.bak/
 # Dataset and Training
 dataset/
 detected_defects/
+# Скачанные датасеты (fetch_freshness_dataset.py) и веса (train_freshness.py).
+# Комментарий обязан быть на отдельной строке: в .gitignore текст после паттерна
+# считается частью самого паттерна, и правило перестаёт работать.
+data/
+models/*.pt
+freshness_results/
 
 # Logs and Reports
 *.log
 app.log
 *.json
+# Метрики обученной модели — маленькие и важны для истории, держим в git
+!models/freshness_metrics.json
 
-# Media Output (Too large for Git)
-production.mp4
-production_with_realistic_defects.mp4
-production_fish_marel.mp4
-presentation_video.mp4
+# Media Output (Too large for Git).
+# Видео в репозиторий не кладём — кроме демо-ролика в assets/, который
+# пересобирается командой `main_freshness.py --record assets/demo.mp4`.
+*.mp4
+!assets/*.mp4
+_source_clips/
 _defect_frames/
 
 # Source media for README (large / regenerable) — assets/ kept, see below

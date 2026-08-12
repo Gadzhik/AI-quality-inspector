@@ -1,6 +1,7 @@
 """Headless-проверка HUD: рендерит оверлей на реальном дефектном и чистом кадре
 видео и сохраняет PNG для визуальной инспекции (без GUI-окна)."""
 import cv2
+from src.analyzer import DEFAULT_MODEL
 from src.defect_manifest import DefectManifest
 from src import hud
 
@@ -38,7 +39,9 @@ def main():
     manifest = DefectManifest(MANIFEST)
     print(f"episodes: {len(manifest.episodes)}")
     cap = cv2.VideoCapture(VIDEO)
-    model = "GEMMA-4-12B-QAT"
+    # Лейбл модели берём из анализатора, а не хардкодим — иначе на HUD висит
+    # имя модели, которой давно нет в конфиге.
+    model = DEFAULT_MODEL.split("/")[-1].upper()
 
     # дефектный кадр = середина первого эпизода
     if manifest.episodes:

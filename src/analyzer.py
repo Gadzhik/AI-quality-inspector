@@ -15,11 +15,26 @@ load_dotenv()
 
 logger = setup_logger(name="AIAnalyzer")
 
+# Прикладывать ли к запросу визуальные few-shot-примеры из dataset/.
+# ВЫКЛЮЧЕНО (2026-08-12): собранные образцы сохранялись ПОСЛЕ отрисовки HUD, то
+# есть содержат выжженный интерфейс («QUALITY OK», FPS, таймкод), а негативный
+# пример — это чистое мясо с нарисованной вручную красной рамкой. На замерах
+# такие «эталоны» не помогали. Сохранение датасета исправлено (main.py пишет
+# кадр ДО HUD); включить обратно имеет смысл, когда накопятся чистые образцы.
+USE_VISUAL_FEWSHOT = False
+
+# Модель по умолчанию. Замер 2026-08-12 на RTX 3070 Ti (8 ГБ):
+#   qwen/qwen3-vl-8b       — 5.76 ГБ, влезает в VRAM целиком, ~3 с/кадр, recall 9/9
+#   google/gemma-4-12b-qat — забивает VRAM (7972/8192 МБ), ~25 с/кадр, recall 0/9
+# Отсюда и переход. Имя используется ещё и как лейбл модели на HUD.
+DEFAULT_MODEL = "qwen/qwen3-vl-8b"
+
+
 class AIAnalyzer:
     """
     Class to analyze images using a local Ollama instance (Llava model).
     """
-    def __init__(self, model_name: str = "google/gemma-4-12b-qat"):
+    def __init__(self, model_name: str = DEFAULT_MODEL):
         self.model_name = model_name
         self.endpoint_url = "http://localhost:1234/v1"
         self.dataset_dir = "dataset"
@@ -40,7 +55,7 @@ class AIAnalyzer:
 
     def check_few_shot_ready(self) -> bool:
         """Called by main.py to check if few-shot mode is active."""
-        return self.cached_pos_path is not None
+        return USE_VISUAL_FEWSHOT and self.cached_pos_path is not None
 
     def _update_reference_cache(self):
         """Update paths to random positive/negative reference images."""
@@ -159,44 +174,55 @@ class AIAnalyzer:
             jpg_as_text = self.preprocess_frame(frame)
             
             
-            recent_neg_imgs = sorted(glob.glob(os.path.join(self.neg_dir, "*.jpg")), key=os.path.getmtime, reverse=True)[:1]
-            recent_pos_imgs = sorted(glob.glob(os.path.join(self.pos_dir, "*.jpg")), key=os.path.getmtime, reverse=True)[:1]
-            
-            # Промпт для говядины (Industrial Beef Inspector) - Focus & Structure
-            system_prompt = """Act as a specialized computer vision system for food production quality control.
+            recent_neg_imgs = recent_pos_imgs = []
+            if USE_VISUAL_FEWSHOT:
+                recent_neg_imgs = sorted(glob.glob(os.path.join(self.neg_dir, "*.jpg")), key=os.path.getmtime, reverse=True)[:1]
+                recent_pos_imgs = sorted(glob.glob(os.path.join(self.pos_dir, "*.jpg")), key=os.path.getmtime, reverse=True)[:1]
 
-Input Analysis:
-You are provided with a 'Current Frame' of a beef carcass and 'Reference' images.
-Reference (Negative): Look at the RED BOXES. They mark dark blood clots and bruises. This is your target pattern.
-Reference (Positive): Shows clean meat. Use this to understand the normal texture.
+            # Промпт для мясного цеха (Industrial Meat Inspector).
+            # Переписан 2026-08-12 по результатам замеров на qwen3-vl-8b
+            # (15 сцен: 9 дефектов + 6 чистых кадров):
+            #   старый промпт — recall 5/9;  этот — 9/9 при том же времени (~3 с).
+            # Что изменилось и почему:
+            #   * убрано «When in doubt, the product is CLEAN» — эта фраза глушила
+            #     детекцию: модель по умолчанию выбирала «чисто»;
+            #   * добавлено ОПИСАНИЕ ВНЕШНЕГО ВИДА дефекта (тёмно-багровое/почти
+            #     чёрное пятно с мягкими краями, темнее окружающей мышцы) — модель
+            #     ищет конкретную сигнатуру, а не абстрактную «аномалию»;
+            #   * добавлено поблочное сканирование (левая/центральная/правая часть);
+            #   * явно сказано, что пропуск дефекта — это отказ пищевой безопасности.
+            # Список «не дефект» сохранён: он держит ложные срабатывания на нуле.
+            system_prompt = """You are an industrial machine-vision inspector on a meat processing line.
 
-CRITICAL CONTEXT - AVOID FALSE ALARMS:
-Raw beef is NATURALLY deep red and has visible muscle striations, marbling and glossy wet surface.
-Normal red meat, normal fat (white/cream), and natural color variation are NOT defects.
-A defect is a DISTINCT, well-bounded ABNORMALITY that clearly stands out from surrounding tissue:
-a dark purple/black blood clot, a deep bruise, or a foreign fragment (bone splinter).
-When in doubt, the product is CLEAN. Only report a defect if you are clearly confident.
+TASK: find blood clots, bruises and bone fragments on the MEAT in the image.
+A blood clot or bruise looks like a DARK PURPLE, MAROON or near-BLACK patch with soft
+edges, clearly darker than the surrounding red muscle tissue. A bone fragment is a bright
+ivory-white sliver. These stand out from normal tissue.
 
-Execution Rules:
-Scan the 'Current Frame' ONLY for the abnormalities described above on the meat surface.
-ABSOLUTELY IGNORE: shiny metal equipment, hooks, blue uniforms of workers, conveyor belts,
-shadows, and any text overlays like 'QUALITY OK'. A spot on metal/equipment is NOT a defect.
+NOT defects: normal red muscle, white/cream fat, marbling, wet glossy highlights,
+metal equipment, saws, hooks, cutting boards and tables, workers' clothing and gloves,
+tiled walls, shadows, and any text overlays burned into the frame.
 
-Coordinates:
-Boxes use a normalized 0-1000 scale relative to the image (0=top/left, 1000=bottom/right),
-format [ymin, xmin, ymax, xmax]. Make each box tight around the single defect.
+METHOD: scan the meat surface region by region (left, centre, right). If any region
+contains a patch that is markedly darker or more purple than the meat around it, report it.
+Do not be conservative: a missed clot is a food-safety failure. Report the single most
+suspicious region.
 
-Output Format:
-Return ONLY a raw JSON object. No conversation, no markdown blocks, no 'here is your result'.
+COORDINATES: normalized 0-1000 scale of the whole image, format [ymin, xmin, ymax, xmax].
+The box must be tight around the patch itself, not around the whole piece of meat.
 
-JSON Structure (defect present):
+Return ONLY a raw JSON object, no markdown, no explanations:
 {"defect": true, "boxes": [[ymin, xmin, ymax, xmax]], "confidence": 85, "reason": "blood_clot"}
-If the meat is clean / no clear defect, return:
-{"defect": false, "boxes": [], "confidence": 95}"""
+or, if the meat is clean:
+{"defect": false, "boxes": [], "confidence": 95, "reason": "none"}"""
 
-            user_prompt = ("The first image(s) are REFERENCE examples only. "
-                           "The LAST image labeled 'CURRENT FRAME' is the one to inspect. "
-                           "Do NOT explain or think out loud. Your entire reply must be the JSON object only.")
+            if recent_neg_imgs or recent_pos_imgs:
+                user_prompt = ("The first image(s) are REFERENCE examples only. "
+                               "The LAST image labeled 'CURRENT FRAME' is the one to inspect. "
+                               "Do NOT explain or think out loud. Your entire reply must be the JSON object only.")
+            else:
+                user_prompt = ("Inspect the image labeled 'CURRENT FRAME'. Do NOT explain or "
+                               "think out loud. Your entire reply must be the JSON object only.")
 
             content_array = [
                 {

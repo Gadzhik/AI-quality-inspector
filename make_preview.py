@@ -3,15 +3,17 @@
 кадр с дефектом -> assets/screenshot.jpg. Гарантирует актуальный HUD без
 сторонних надписей. GIF собирается отдельно через ffmpeg."""
 import cv2
+from src.analyzer import DEFAULT_MODEL
 from src.defect_manifest import DefectManifest
 from src import hud
 
 VIDEO = "production_with_realistic_defects.mp4"
 MANIFEST = "defects_manifest.json"
-MODEL = "GEMMA-4-12B-QAT"
+MODEL = DEFAULT_MODEL.split("/")[-1].upper()
 
-START, END = 150, 800      # клин -> дефект(265-390) -> клин -> дефект(600-725) -> клин
-SHOT_FRAME = 327           # середина первого эпизода для скриншота
+# Границы превью и кадр для скриншота считаем ПО МАНИФЕСТУ: раньше они были
+# захардкожены под конкретное демо-видео и после перегенерации указывали в пустоту.
+START = END = SHOT_FRAME = 0
 
 
 def build_state(ep, idx, defects_found, fps=25):
@@ -26,8 +28,24 @@ def build_state(ep, idx, defects_found, fps=25):
     }
 
 
+def pick_range(manifest):
+    """Отрезок «чисто -> дефект -> чисто -> дефект -> чисто» вокруг первых двух
+    эпизодов манифеста и кадр из середины первого эпизода для скриншота."""
+    eps = manifest.episodes
+    if not eps:
+        return 0, 400, 100
+    first = eps[0]
+    last = eps[min(1, len(eps) - 1)]
+    start = max(0, first["start"] - 60)
+    end = last["end"] + 60
+    shot = (first["start"] + first["end"]) // 2
+    return start, end, shot
+
+
 def main():
+    global START, END, SHOT_FRAME
     manifest = DefectManifest(MANIFEST)
+    START, END, SHOT_FRAME = pick_range(manifest)
     cap = cv2.VideoCapture(VIDEO)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

@@ -1,0 +1,13 @@
+# Зависимости для ОБУЧЕНИЯ модели (train_freshness.py). Для демо-плееров не нужны.
+#
+# PyTorch ставится с индекса под конкретную версию CUDA, иначе с PyPI приедет
+# CPU-сборка и обучение пойдёт в разы медленнее. Проверено на RTX 3070 Ti,
+# драйвер 610.88, Python 3.14:
+#
+#   pip install -r requirements-train.txt --index-url https://download.pytorch.org/whl/cu128
+#
+# Для другой видеокарты/драйвера подберите индекс на https://pytorch.org/get-started/locally/
+# Проверка, что GPU виден:  python -c "import torch; print(torch.cuda.is_available())"
+
+torch
+torchvision

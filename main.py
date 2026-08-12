@@ -1,7 +1,7 @@
 import cv2
 import time
 from src.camera import CameraStream
-from src.analyzer import AIAnalyzer
+from src.analyzer import AIAnalyzer, DEFAULT_MODEL
 from src.dataset_collector import DatasetCollector
 from src.defect_manifest import DefectManifest
 from src import hud
@@ -24,7 +24,7 @@ def main():
         try:
             model_label = AIAnalyzer().model_name.split("/")[-1].upper()
         except Exception:
-            model_label = "GEMMA-4-12B-QAT"
+            model_label = DEFAULT_MODEL.split("/")[-1].upper()
 
         if not manifest.loaded:
             logger.warning("No manifest loaded — running without defect detection. "
@@ -78,9 +78,15 @@ def main():
                 "defects_found": defects_found,
                 "frame_idx": frame_idx,
             }
-            hud.render(frame, state)
+            # HUD рисуем на КОПИИ: `frame` остаётся чистым кадром камеры.
+            # Раньше hud.render() правил кадр на месте, и в датасет по клавишам
+            # s/d улетали образцы с выжженным интерфейсом («QUALITY OK», FPS,
+            # таймкод) — такие «эталоны» портили few-shot и не годятся для
+            # дообучения.
+            display = frame.copy()
+            hud.render(display, state)
 
-            cv2.imshow("AI Quality Inspector", frame)
+            cv2.imshow("AI Quality Inspector", display)
 
             key = cv2.waitKey(25) & 0xFF
             if key == ord("q"):
