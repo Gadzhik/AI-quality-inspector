@@ -60,8 +60,10 @@ _defect_frames/
 example.mp4
 example.jpg
 
-# Verification renders (regenerable via verify_hud.py)
+# Verification renders (regenerable via verify_hud.py и навыками в .claude/skills)
 _verify_*.png
+_pixel_samples.jpg
+_demo_raw.mp4
 
 # IDEs and Editors
 .idea/
